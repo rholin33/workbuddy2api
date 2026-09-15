@@ -142,6 +142,105 @@ func TestPrepareBodyOptWithEfforts(t *testing.T) {
 			if !ok || got != c.wantVal {
 				t.Errorf("%s: got %v (%T) want %q", c.wantKey, m[c.wantKey], m[c.wantKey], c.wantVal)
 			}
-		})
-	}
-}
+			})
+			}
+			}
+
+			func TestTrimTrailingAssistant(t *testing.T) {
+			cases := []struct {
+			name      string
+			body      string
+			wantRoles []string
+			}{
+			{
+				"tool 之后的悬空 assistant 消息被剥除",
+				`{"messages":[
+					{"role":"user","content":"u"},
+					{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f"}}]},
+					{"role":"tool","tool_call_id":"c1","content":"res"},
+					{"role":"assistant","content":"","reasoning_content":"thinking"}
+				]}`,
+				[]string{"user", "assistant", "tool"},
+			},
+			{
+				"tool 之后带文字 content 但在末尾的 assistant 同样剥除",
+				`{"messages":[
+					{"role":"user","content":"u"},
+					{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f"}}]},
+					{"role":"tool","tool_call_id":"c1","content":"res"},
+					{"role":"assistant","content":"done"}
+				]}`,
+				[]string{"user", "assistant", "tool"},
+			},
+			{
+				"末尾 content 为空的 assistant 剥除",
+				`{"messages":[
+					{"role":"user","content":"u"},
+					{"role":"assistant","content":"","reasoning_content":"thought"}
+				]}`,
+				[]string{"user"},
+			},
+			{
+				"末尾空白字符 content 的 assistant 剥除",
+				`{"messages":[
+					{"role":"user","content":"u"},
+					{"role":"assistant","content":"   "}
+				]}`,
+				[]string{"user"},
+			},
+			{
+				"末尾带有合法 content 的 assistant 原样保留",
+				`{"messages":[
+					{"role":"user","content":"u"},
+					{"role":"assistant","content":"valid text"}
+				]}`,
+				[]string{"user", "assistant"},
+			},
+			{
+				"末尾带有 tool_calls 的 assistant 原样保留",
+				`{"messages":[
+					{"role":"user","content":"u"},
+					{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f"}}]}
+				]}`,
+				[]string{"user", "assistant"},
+			},
+			{
+				"非末尾的 tool 消息及后续 assistant 在有 user 时完整保留",
+				`{"messages":[
+					{"role":"user","content":"u1"},
+					{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f"}}]},
+					{"role":"tool","tool_call_id":"c1","content":"res"},
+					{"role":"assistant","content":"done"},
+					{"role":"user","content":"u2"}
+				]}`,
+				[]string{"user", "assistant", "tool", "assistant", "user"},
+			},
+			}
+			for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				out := PrepareBodyOptWithEfforts([]byte(c.body), false, nil)
+				var obj map[string]any
+				if err := json.Unmarshal(out, &obj); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				var got []string
+				if msgs, ok := obj["messages"].([]any); ok {
+					for _, m := range msgs {
+						if mm, ok := m.(map[string]any); ok {
+							if r, ok := mm["role"].(string); ok {
+								got = append(got, r)
+							}
+						}
+					}
+				}
+				if len(got) != len(c.wantRoles) {
+					t.Fatalf("roles count mismatch: got %v want %v", got, c.wantRoles)
+				}
+				for i, want := range c.wantRoles {
+					if got[i] != want {
+						t.Errorf("role[%d] = %q want %q", i, got[i], want)
+					}
+				}
+			})
+			}
+			}

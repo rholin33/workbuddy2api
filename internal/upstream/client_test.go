@@ -43,12 +43,14 @@ func TestClassify(t *testing.T) {
 		{400, `unapproved channel`, ErrContentBlocked},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
-		// ErrBadParams：请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）。
-		// 这是"发给上游的 body 有问题"（网关截断已由 413 消灭，剩余为客户端畸形 JSON），
+		// ErrBadParams：请求体解析失败或参数校验失败（HTTP 400 + code 11101 / 11155 / 11151 等）。
+		// 这是"发给上游的 body 有问题"（网关截断已由 413 消灭，剩余为客户端畸形 JSON/协议参数不合规），
 		// 换了账号也一样 400，不罚号。具体词优先于通用 4xx。
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		{400, `{"code":11155,"msg":"the reasoning content from the previous turn must be passed back in thinking mode"}`, ErrBadParams},
+		{400, `{"code":11151,"msg":"a message has empty content, please check the conversation history and retry"}`, ErrBadParams},
 		{200, `quota exceeded`, ErrHardCredit},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},
