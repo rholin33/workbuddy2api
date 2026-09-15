@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"workbuddy2api/internal/auth"
 )
@@ -119,6 +120,35 @@ var badParamsMarkers = []string{
 	`"code":11155`,
 	"reasoning_content_missing",
 	"empty_message_content",
+}
+
+// contextTooLongMarkers 上游"输入超模型上限"特征（HTTP 400 code=11115，
+// extError.code=context_length_exceeded）。
+//
+// 与 badParamsMarkers 的区别：11155 是**请求结构**问题（悬空 assistant 帧，
+// 客户端可通过 trimTrailingAssistant 修复）；11115 是**请求规模**问题——
+// 网关侧已由 handler 的字节预算预检拦下绝大多数，此处兜底覆盖两类残留：
+//  1. 估算器未收录的模型（contextLimitFor 返回 unknown，未做本地拦截）；
+//  2. 估算器上界仍偏乐观的极端内容分布。
+//
+// 归类为 ErrBadParams 的语义仍然成立：换账号照样 400，不该罚号。
+// 但**必须避免轮转**——同一份超大 body 打 3 个账号各浪费一次上游往返，
+// 最终抛 503 让客户端误判"账号全废"（2026-09-15 线上故障的实际放大路径）。
+var contextTooLongMarkers = []string{
+	`"code":11115`,
+	"context_length_exceeded",
+	"prompt is too long",
+}
+
+// IsContextTooLong 报告上游 body 是否为"输入超出模型上下文上限"。
+// 供 handler 在轮转循环里识别并立即终止（不再换号重试同一份超大请求）。
+func IsContextTooLong(body string) bool {
+	for _, m := range contextTooLongMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
@@ -230,6 +260,13 @@ func Classify(status int, body string) ErrKind {
 			if strings.Contains(body, m) {
 				return ErrBadParams
 			}
+		}
+		// 输入超模型上限（code 11115 / context_length_exceeded）：同样归 ErrBadParams（不罚号），
+		// 但语义上换账号也毫无意义——同一份超大 body 对每个账号都是 400。
+		// 轮转只会平白多打上游几次并把错误升级成 503，故由 handler 侧 IsContextTooLong
+		// 短路终止（见 handler.chatCompletions）。此处仅做分类。
+		if IsContextTooLong(body) {
+			return ErrBadParams
 		}
 		return ErrClient
 	}
@@ -817,6 +854,20 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	return err
 }
 
+// Utf8Truncate 截断为最多 n 字节，且不切断 UTF-8 字符（用户可见错误文案用）。
+func Utf8Truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	// 回退到最后一个完整 rune 边界。
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) > n {
@@ -824,3 +875,4 @@ func truncate(s string, n int) string {
 	}
 	return s
 }
+

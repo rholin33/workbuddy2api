@@ -83,6 +83,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	h.mux.HandleFunc("GET /workbuddy", h.serveDashboard)
+	h.mux.HandleFunc("GET /workbuddy/", h.serveDashboard)
+	h.mux.HandleFunc("GET /workbuddy/api/status", h.status)
 	return h
 }
 
@@ -307,6 +310,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 上下文预算预检（出站前的本地拦截）：按最坏情况 bytes/token 保守估算 token 数，
+	// 超过上游模型上限则直接本地 400 context_length_exceeded，不打上游、不罚账号、不轮转。
+	// 为什么必须有：字节数上限（server.max_body_mb=8MB）拦不住大 token 请求——8MB 随机
+	// 汉字约 4.8M token，远超 1,048,576 上限；放行后每个账号都撞 400 code=11115，
+	// 最终抛 503，客户端侧误以为"账号/额度全废"（2026-09-15 线上故障根因）。
+	if model, limit, known := h.contextLimitFor(peek.Model); known {
+		if est := upstream.EstimateTokensFromBytes(len(body)); est > limit {
+			writeOpenAIError(w, http.StatusBadRequest, "context_length_exceeded",
+				fmt.Sprintf("请求体约 %d token，超过模型 %s 的 %d 上限（按最坏情况 %.1f bytes/token 保守估算）：请压缩历史或新建会话后重试",
+					est, model, limit, upstream.TokensPerByteFloor))
+			st.status = http.StatusBadRequest
+			log.Printf("context budget rejected: model=%s bytes=%d est_tokens=%d limit=%d",
+				model, len(body), est, limit)
+			return
+		}
+	}
+
 	// 系统提示词改写（出站前、轮转前；每个请求一次）。
 	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
 	//   - passthrough + 降级期：换 Degraded 中性提示词直达，不再先撞 400。
@@ -383,6 +403,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if status >= 400 {
 			st.status = status
 			kind := upstream.Classify(status, string(respBody))
+			// 输入超模型上限（400 code=11115）：本地预算预检的兜底路径。
+			// 同一份超大 body 换任何账号都是 400，继续轮转只会白打上游 + 把错误
+			// 升级成 503 no_healthy_account，让客户端误判"账号全废"。
+			// 故立即终止并回传上游原始语义（400 context_length_exceeded），
+			// 不罚账号（ErrBadParams 语义）、不轮转。
+			if upstream.IsContextTooLong(string(respBody)) {
+				writeOpenAIError(w, http.StatusBadRequest, "context_length_exceeded",
+					"上游拒绝：输入超出模型上下文上限。请压缩历史或新建会话后重试。上游原文："+
+						upstream.Utf8Truncate(string(respBody), 300))
+				st.status = http.StatusBadRequest
+				fail(acct.UID)
+				log.Printf("context too long from upstream (no rotate): uid=%s model=%s bytes=%d body=%s",
+					acct.UID, peek.Model, len(body), upstream.Utf8Truncate(string(respBody), 200))
+				return
+			}
 			// 内容拦截误报（passthrough 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试。
 			// 第二次仍被拦（用户内容本身触发审核）→ 走既有错误路径返回客户端。
@@ -436,6 +471,70 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
 	st.status = http.StatusServiceUnavailable
+}
+
+// contextLimitFor 返回 (模型名, 输入 token 上限, 是否已知)。
+//
+// 上限来源优先级：
+//  1. 已缓存的上游动态模型列表（FetchModels 的 maxInputTokens，TTL 1h）——权威值；
+//  2. global 探测模式下所有模型都只有 131072 的兜底值 → 视为"未探明"，
+//     回落下面的静态表（避免把 deepseek 的真实 1M 上限误压成 128k）；
+//  3. 静态表未收录 → (model, 0, false)，不做本地拦截（宁可放行让上游判定，
+//     也不要因为估算器未收录而误杀正常请求）。
+//
+// **只读缓存，绝不触发网络请求**：本函数在每一条聊天请求的出站路径上，
+// 若在此按需 FetchModels 会引入额外上游往返（首字节延迟被拖到秒级）、
+// 平白占用一次选号名额，还会与轮转循环争抢池状态。
+// 缓存未就绪时直接用静态表（数值来自实测，已覆盖当前全部在服模型）。
+//
+// 注意：本函数只做"输入预算"判定，不感知 max_tokens 输出预留。
+func (h *Handler) contextLimitFor(model string) (string, int64, bool) {
+	if model == "" {
+		return "", 0, false
+	}
+	if lim, ok := cachedContextLimit(model); ok {
+		return model, lim, true
+	}
+	if lim, ok := staticContextLimits[model]; ok {
+		return model, lim, true
+	}
+	return "", 0, false
+}
+
+// cachedContextLimit 只读 dynamicModelsCache（不触发拉取），未命中返回 false。
+func cachedContextLimit(model string) (int64, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	for _, mi := range dynamicModelsCache.ids {
+		if mi.ID == model && mi.ContextWindow > 0 && mi.ContextWindow != globalModelContextFallback {
+			return mi.ContextWindow, true
+		}
+	}
+	return 0, false
+}
+
+// globalModelContextFallback global 探测模式写入的兜底 contextWindow
+// （见 upstream.fetchGlobalModels）。等于该值说明未探明真实上限。
+const globalModelContextFallback = 131072
+
+// staticContextLimits 静态输入上限兜底表（上游动态接口不可用/未探明时使用）。
+// 数值取自 2026-09-15 上游 models 接口与 11115 错误文案实测：
+// deepseek-v4.1-flash / v4-pro 上限 1,048,576；其余 128k 档。
+var staticContextLimits = map[string]int64{
+	"deepseek-v4.1-flash": 1048576,
+	"deepseek-v4.1-pro":   1048576,
+	"deepseek-v4-pro":     1048576,
+	"deepseek-v4-flash":   1048576,
+	"deepseek-v4":         1048576,
+	"deepseek-reasoner":   1048576,
+	"glm-5.2":             131072,
+	"glm-5.1":             131072,
+	"kimi-k2.5":           131072,
+	"kimi-k2.6":           131072,
+	"kimi-k3":             131072,
+	"minimax-m3":          131072,
+	"gpt-5.4":             131072,
+	"gpt-5.3-codex":       131072,
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。

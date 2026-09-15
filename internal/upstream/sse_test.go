@@ -404,8 +404,13 @@ func TestAggregateEmptyStreamError(t *testing.T) {
 	}
 }
 
-// TestStreamEmptyFramesCase 覆盖流式空流检测：0 有效帧时写 error 帧（error 字段存活）,
-// 恰好一个 [DONE]，并返回非 nil error。
+// TestStreamEmptyFramesCase 覆盖流式空流检测（commit 0e17ccc 后的现行契约）：
+// 0 有效帧时**不再返回 error、也不写 error 帧**，而是合成一帧合法的空 delta
+// （finish_reason=stop）再加恰好一个 [DONE]，让 CPA 侧干净收流。
+//
+// 历史：本用例原先断言"必须返回非 nil error + 携带 empty upstream stream 的
+// error 帧"，那是空流修复之前的旧行为，已与 sse.go 的现行实现矛盾（该用例在
+// 0e17ccc 提交时漏改，长期 FAIL，掩盖了后续真实回归信号）。
 func TestStreamEmptyFramesCase(t *testing.T) {
 	cases := []struct {
 		name string
@@ -418,33 +423,54 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			err := Stream(rec, strings.NewReader(c.raw))
-			if err == nil {
-				t.Fatalf("expected error, got nil")
+			if err := Stream(rec, strings.NewReader(c.raw)); err != nil {
+				t.Fatalf("empty stream must not error (synthesized frame instead): %v", err)
 			}
 			body := rec.Body.String()
+			// 恰好一个 [DONE]（上游漏发时兜底补上，不多不少）。
 			if n := strings.Count(body, "data: [DONE]"); n != 1 {
 				t.Errorf("[DONE] count=%d want 1: %q", n, body)
 			}
-			// error 帧必须原样保留 error 字段（未被 normalizeFrame 白名单剥掉）
-			var e map[string]any
-			found := false
+			// 必须存在一帧合法空 delta，供 CPA 正常结束流（避免
+			// "upstream stream closed before [DONE]"）。
+			sawEmptyDelta := false
 			for _, ln := range strings.Split(body, "\n") {
 				ln = strings.TrimSpace(ln)
-				if strings.HasPrefix(ln, "data: ") {
-					payload := strings.TrimPrefix(ln, "data: ")
-					if payload == "[DONE]" {
-						continue
-					}
-					if json.Unmarshal([]byte(payload), &e) == nil {
-						if em, ok := e["error"].(map[string]any); ok && em["message"] == "empty upstream stream" && em["type"] == "upstream_error" {
-							found = true
-						}
+				if !strings.HasPrefix(ln, "data: ") {
+					continue
+				}
+				payload := strings.TrimPrefix(ln, "data: ")
+				if payload == "[DONE]" {
+					continue
+				}
+				var frame map[string]any
+				if json.Unmarshal([]byte(payload), &frame) != nil {
+					continue
+				}
+				// 空流兜底帧不得携带 error 字段。
+				if _, hasErr := frame["error"]; hasErr {
+					t.Errorf("synthesized frame must not carry error field: %q", payload)
+				}
+				chs, _ := frame["choices"].([]any)
+				if len(chs) == 0 {
+					continue
+				}
+				ch, _ := chs[0].(map[string]any)
+				if ch == nil {
+					continue
+				}
+				delta, _ := ch["delta"].(map[string]any)
+				if delta == nil {
+					continue
+				}
+				if _, ok := delta["content"]; ok {
+					if fr, _ := ch["finish_reason"].(string); fr == "stop" {
+						sawEmptyDelta = true
 					}
 				}
 			}
-			if !found {
-				t.Errorf("error frame absent or error field stripped: %q", body)
+			if !sawEmptyDelta {
+				t.Errorf("synthesized empty delta frame (delta.content + finish_reason=stop) absent: %q", body)
 			}
 		})
 	}

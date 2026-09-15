@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WorkBuddy 国际版 · 状态监控面板</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090c10;
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --card-hover: #1f242c;
+      --text: #c9d1d9;
+      --text-bright: #f0f6fc;
+      --text-muted: #8b949e;
+      --accent-green: #238636;
+      --accent-green-glow: rgba(46, 160, 67, 0.4);
+      --green-text: #3fb950;
+      --accent-blue: #1f6feb;
+      --blue-text: #58a6ff;
+      --accent-cyan: #38bdf8;
+      --accent-purple: #a855f7;
+      --danger-text: #f85149;
+      --danger-bg: rgba(248, 81, 73, 0.1);
+      --badge-bg: #21262d;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 1120px;
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 16px;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 16px;
+    }
+
+    .logo-area {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-badge {
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      color: #fff;
+      font-weight: 700;
+      font-size: 20px;
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-bright);
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn {
+      background: var(--badge-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-bright);
+      font-size: 13px;
+      font-weight: 500;
+      padding: 7px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+      text-decoration: none;
+    }
+
+    .btn:hover {
+      background: var(--card-border);
+      color: #fff;
+    }
+
+    .btn-primary {
+      background: #238636;
+      border-color: rgba(240, 246, 252, 0.1);
+    }
+
+    .btn-primary:hover {
+      background: #2ea043;
+    }
+
+    /* Stat Overview Grid */
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.2s;
+    }
+
+    .stat-card:hover {
+      border-color: #58a6ff44;
+    }
+
+    .stat-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .stat-value {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--text-bright);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .stat-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* Accounts Section */
+    .section-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-bright);
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .accounts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+      gap: 18px;
+      margin-bottom: 30px;
+    }
+
+    .account-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      position: relative;
+      overflow: hidden;
+      transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .account-card:hover {
+      border-color: #38bdf855;
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .avatar-area {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: #1f293d;
+      border: 1px solid #334155;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 16px;
+      color: var(--accent-cyan);
+    }
+
+    .account-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .account-email {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-bright);
+      word-break: break-all;
+    }
+
+    .account-realm {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--accent-cyan);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .status-pill {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .status-healthy {
+      background: rgba(46, 160, 67, 0.15);
+      color: var(--green-text);
+      border: 1px solid rgba(46, 160, 67, 0.3);
+    }
+
+    .status-cooling {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+      border: 1px solid rgba(210, 153, 34, 0.3);
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background-color: currentColor;
+      box-shadow: 0 0 8px currentColor;
+    }
+
+    /* Metrics Inside Card */
+    .metrics-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(48, 54, 61, 0.6);
+      padding: 12px 14px;
+      border-radius: 8px;
+    }
+
+    .metric-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .metric-val {
+      font-size: 18px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text-bright);
+    }
+
+    .metric-success {
+      color: var(--green-text);
+    }
+
+    .metric-credit {
+      color: var(--blue-text);
+    }
+
+    .card-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-muted);
+      padding-top: 6px;
+      border-top: 1px solid rgba(48, 54, 61, 0.4);
+    }
+
+    .uid-tag {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      background: var(--badge-bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--text-muted);
+    }
+
+    /* Live pulse ticker */
+    .pulse-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green-text);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.7); }
+      70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(63, 185, 80, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(63, 185, 80, 0); }
+    }
+
+    footer {
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 20px;
+      padding: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo-area">
+        <div class="logo-badge">W</div>
+        <div>
+          <h1>WorkBuddy 国际版 · 状态监控面板</h1>
+          <div class="subtitle">实时多账号轮转调度 · 积分与调用监控</div>
+        </div>
+      </div>
+      <div class="nav-actions">
+        <div class="pulse-indicator">
+          <span class="pulse-dot"></span>
+          <span id="updateTime">正在同步...</span>
+        </div>
+        <button class="btn" onclick="fetchStatus()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+          刷新
+        </button>
+        <a href="/management.html" class="btn btn-primary">
+          CPA 控制台
+        </a>
+      </div>
+    </header>
+
+    <!-- Overview Stats -->
+    <div class="overview-grid">
+      <div class="stat-card">
+        <div class="stat-title">在线健康账号</div>
+        <div class="stat-value" id="healthyCount" style="color: var(--green-text);">-- / --</div>
+        <div class="stat-desc">支持高可用轮转与会话粘性</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">总计成功调用</div>
+        <div class="stat-value" id="totalSuccess" style="color: var(--blue-text);">--</div>
+        <div class="stat-desc">各模型累计完成推理请求数</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">总可用积分余额</div>
+        <div class="stat-value" id="totalCredits" style="color: var(--accent-cyan);">--</div>
+        <div class="stat-desc">每日自动签到 & 保持活跃</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">代理与上游状态</div>
+        <div class="stat-value" style="font-size: 18px; color: var(--green-text); line-height: 26px;">Global (US)</div>
+        <div class="stat-desc">通过 Xray 出口直连官方服务</div>
+      </div>
+    </div>
+
+    <!-- Accounts Cards Grid -->
+    <div class="section-title">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+      已挂载账号详情
+    </div>
+    <div class="accounts-grid" id="accountsList">
+      <div style="color: var(--text-muted); font-size: 13px; grid-column: 1 / -1; padding: 24px; text-align: center;">
+        正在拉取网关数据...
+      </div>
+    </div>
+
+    <footer>
+      WorkBuddy 网关系统运行中 · 端口 7863 · 负载均衡与熔断保护已开启
+    </footer>
+  </div>
+
+  <script>
+    function formatTime(isoStr) {
+      if (!isoStr || isoStr.startsWith('0001')) return '暂无记录';
+      const d = new Date(isoStr);
+      return d.toLocaleTimeString('zh-CN', { hour12: false });
+    }
+
+    async function fetchStatus() {
+      try {
+        const resp = await fetch('/workbuddy/api/status');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        render(data);
+      } catch (err) {
+        console.error('Fetch status error:', err);
+        document.getElementById('updateTime').innerText = '拉取失败 (重试中...)';
+      }
+    }
+
+    function render(data) {
+      const now = new Date();
+      document.getElementById('updateTime').innerText = '最后同步: ' + now.toLocaleTimeString();
+
+      const total = data.total || 0;
+      const healthy = data.healthy || 0;
+      document.getElementById('healthyCount').innerText = `${healthy} / ${total}`;
+
+      const accounts = data.accounts || [];
+      let totalSuccess = 0;
+      let totalCredits = 0;
+
+      const container = document.getElementById('accountsList');
+      container.innerHTML = '';
+
+      accounts.forEach((acc, idx) => {
+        totalSuccess += (acc.success_count || 0);
+        totalCredits += (acc.credits || 0);
+
+        const email = acc.nickname || 'Unknown';
+        const initial = email[0].toUpperCase();
+        const isCooling = acc.cooling;
+        const isDisabled = acc.disabled;
+
+        let statusClass = 'status-healthy';
+        let statusText = '正常在线';
+        if (isDisabled) {
+          statusClass = 'status-cooling';
+          statusText = '已停用';
+        } else if (isCooling) {
+          statusClass = 'status-cooling';
+          statusText = '冷却中';
+        }
+
+        const card = document.createElement('div');
+        card.className = 'account-card';
+        card.innerHTML = `
+          <div class="card-top">
+            <div class="avatar-area">
+              <div class="avatar">${initial}</div>
+              <div class="account-meta">
+                <div class="account-email">${email}</div>
+                <div class="account-realm">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                  ${acc.realm === 'global' ? 'Global 国际版' : 'CN 境内版'}
+                </div>
+              </div>
+            </div>
+            <div class="status-pill ${statusClass}">
+              <span class="status-dot"></span>
+              ${statusText}
+            </div>
+          </div>
+
+          <div class="metrics-row">
+            <div class="metric-item">
+              <div class="metric-label">成功调用次数</div>
+              <div class="metric-val metric-success">${acc.success_count || 0}</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-label">剩余积分</div>
+              <div class="metric-val metric-credit">${acc.credits != null ? acc.credits : '--'}</div>
+            </div>
+          </div>
+
+          <div class="metrics-row" style="background: transparent; border: none; padding: 0 4px; margin-top: -6px;">
+            <div class="metric-item">
+              <div class="metric-label">在途请求 (并发)</div>
+              <div class="metric-val" style="font-size: 14px;">${acc.in_flight || 0}</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-label">连续异常计数</div>
+              <div class="metric-val" style="font-size: 14px; color: ${acc.breaker_fails > 0 ? 'var(--danger-text)' : 'var(--text-muted)'};">${acc.breaker_fails || 0}</div>
+            </div>
+          </div>
+
+          <div class="card-footer">
+            <span>最近响应: ${formatTime(acc.last_success)}</span>
+            <span class="uid-tag">${acc.uid.slice(0, 8)}...</span>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+
+      document.getElementById('totalSuccess').innerText = totalSuccess;
+      document.getElementById('totalCredits').innerText = totalCredits;
+    }
+
+    // 初次加载并开启 3 秒轮询
+    fetchStatus();
+    setInterval(fetchStatus, 3000);
+  </script>
+</body>
+</html>
