@@ -142,6 +142,9 @@ func main() {
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
+		// 上下文预算预检：缺省开启（*bool 为 nil 即未配置）。
+		ContextGuard:   cfg.Server.ContextGuard == nil || *cfg.Server.ContextGuard,
+		MaxInputTokens: cfg.Server.MaxInputTokens,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

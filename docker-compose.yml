@@ -5,9 +5,21 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      - HTTP_PROXY=http://host.docker.internal:10809
+      - HTTPS_PROXY=http://host.docker.internal:10809
+      - NO_PROXY=localhost,127.0.0.1,workbuddy2api,cli-proxy-api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "7863:7863"
+      - "127.0.0.1:7863:7863"
+    networks:
+      - cpa_default
+      - default
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
       - ./config.json:/app/config.json:ro
+
+networks:
+  cpa_default:
+    external: true

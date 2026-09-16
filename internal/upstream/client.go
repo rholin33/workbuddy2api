@@ -118,8 +118,36 @@ var badParamsMarkers = []string{
 	`"code":11101`,
 	`"code":11151`,
 	`"code":11155`,
+	`"code":11133`,
 	"reasoning_content_missing",
 	"empty_message_content",
+}
+
+// clientParamMarkers 上游明确「请求参数不合法」且**换账号必然同样失败**的特征。
+//
+// 11133 = Invalid request parameters（extError.code = model_param_invalid / invalid_value）。
+// 2026-09-16 受控实测定位真因（对 deepseek-v4.1-flash / gpt-5.3-codex 逐项打）：
+//   - 有效图片（https URL 或内联 data: URL）→ 200，两种形式**等价**，上游对 data: URL 无偏见；
+//   - 图片字节无效（截断的 PNG / 纯随机 base64 垃圾）→ 11133；
+//   - 有效图片 + 1.5MB 尾部垃圾（请求体 2MB）→ 200（填充字节被忽略）。
+//
+// 即：诱因是「内容本身不合法」，不是 URL 形式、不是体积、也与账号健康无关。
+// 故必须短路：同一份 body 轮转 3 个账号各拿一次 400，最终把错误升级成
+// 503 no_healthy_account，客户端会误判成「账号全废 / 额度用尽」——
+// 这是 2026-09-16 线上「看起来账号全挂、实际是请求参数问题」的实际成因。
+var clientParamMarkers = []string{
+	`"code":11133`,
+	"model_param_invalid",
+}
+
+// IsClientParamError 报告上游 body 是否为与账号无关的请求参数不合法（换号必同样失败）。
+func IsClientParamError(body string) bool {
+	for _, m := range clientParamMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // contextTooLongMarkers 上游"输入超模型上限"特征（HTTP 400 code=11115，
