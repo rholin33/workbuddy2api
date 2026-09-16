@@ -32,6 +32,10 @@ type Config struct {
 	// MaxBodyBytes 聊天请求体大小上限；<=0 兜底 8<<20（8MB）。
 	// 超限直接 413 request_body_too_large（不再静默截断喂给上游，issue #41）。
 	MaxBodyBytes int64
+	// ContextGuard 上下文预算预检开关（main 默认置 true；零值 false = 仅靠上游 11115 短路兜底）。
+	ContextGuard bool
+	// MaxInputTokens >0 时作为所有模型的统一输入上限；0 = 按模型查表（未收录不拦截）。
+	MaxInputTokens int64
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -101,6 +105,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	h.mux.HandleFunc("GET /workbuddy", h.serveDashboard)
+	h.mux.HandleFunc("GET /workbuddy/", h.serveDashboard)
+	h.mux.HandleFunc("GET /workbuddy/api/status", h.status)
 	return h
 }
 
@@ -536,6 +543,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 上下文预算预检（出站前的本地早退）：按内容类型估算 token 数，明显超限才本地 400。
+	// 规则（宁可漏拦，绝不误杀 —— 见 upstream/budget.go 的说明）：
+	//   - ContextGuard=false → 整段跳过（只靠上游 11115 短路兜底）；
+	//   - 请求体小于 contextGuardMinBytes → 跳过（不可能超限，避免给热路径加解析开销）；
+	//   - 上限：cfg.MaxInputTokens>0 时全局统一；否则按模型查表，查不到（未验证）不拦截。
+	if h.cfg.ContextGuard && len(body) >= contextGuardMinBytes {
+		if limit := h.inputLimitFor(peek.Model); limit > 0 {
+			if est := upstream.EstimateTokens(body); est > limit {
+				writeOpenAIError(w, http.StatusBadRequest, "context_length_exceeded",
+					fmt.Sprintf("请求体估算约 %d token，超过模型 %s 的 %d 上限：请压缩历史或新建会话后重试",
+						est, peek.Model, limit))
+				st.status = http.StatusBadRequest
+				log.Printf("context budget rejected: model=%s bytes=%d est_tokens=%d limit=%d",
+					peek.Model, len(body), est, limit)
+				return
+			}
+		}
+	}
+
 	// 系统提示词改写（出站前、轮转前；每个请求一次）。
 	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
 	//   - passthrough + 降级期：换 Degraded 中性提示词直达，不再先撞 400。
@@ -677,6 +703,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			}
+			// 输入超模型上限（400 code=11115）：本地预算预检的兜底路径。
+			// 同一份超大 body 换任何账号都是 400，继续轮转只会白打上游 + 把错误
+			// 升级成 503 no_healthy_account，让客户端误判"账号全废"。
+			// 故立即终止并回传上游原始语义（400 context_length_exceeded），
+			// 不罚账号（ErrBadParams 语义）、不轮转。
+			if upstream.IsContextTooLong(string(respBody)) {
+				writeOpenAIError(w, http.StatusBadRequest, "context_length_exceeded",
+					"上游拒绝：输入超出模型上下文上限。请压缩历史或新建会话后重试。上游原文："+
+						upstream.Utf8Truncate(string(respBody), 300))
+				st.status = http.StatusBadRequest
+				fail(acct.UID)
+				log.Printf("context too long from upstream (no rotate): uid=%s model=%s bytes=%d body=%s",
+					acct.UID, peek.Model, len(body), upstream.Utf8Truncate(string(respBody), 200))
+				return
+			}
+			// 请求参数不合法（400 code=11133 / model_param_invalid）：与账号无关，
+			// 换任何账号都是同一份 body → 同样 400。继续轮转只会白打上游 3 次，
+			// 最终把错误升级成 503 no_healthy_account，让客户端误判「账号全废 / 额度用尽」。
+			// 故短路：回传 400 + 上游原文 + 可操作提示。实测诱因（2026-09-16）：
+			// 图片字节无效（截断 PNG、随机 base64 垃圾）等；https 图与内联 data: 图等价。
+			if upstream.IsClientParamError(string(respBody)) {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
+					"上游拒绝：请求参数不合法（换账号同样会失败，非账号/额度问题）。请检查消息体："+
+						"图片必须是完整有效的图片数据、参数取值需被该模型支持。上游原文："+
+						upstream.Utf8Truncate(string(respBody), 300))
+				st.status = http.StatusBadRequest
+				fail(acct.UID)
+				log.Printf("client param error from upstream (no rotate): uid=%s model=%s bytes=%d body=%s",
+					acct.UID, peek.Model, len(body), upstream.Utf8Truncate(string(respBody), 200))
+				return
+			}
 			// 内容拦截误报（passthrough 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试。
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
@@ -809,6 +866,78 @@ func rotateBackoff(i int, ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// contextGuardMinBytes 低于该字节数直接跳过预算估算：这个体积不可能超上限，
+// 没必要在热路径上为每个请求做一次 JSON 解析。
+const contextGuardMinBytes = 512 << 10 // 512KB
+
+// inputLimitFor 返回该请求应受的输入 token 上限；0 表示不拦截（未验证/未知模型）。
+//
+// 优先级：
+//  1. cfg.MaxInputTokens > 0 → 全局统一上限（运维可调，无需改代码）；
+//  2. 已缓存的上游动态模型列表（FetchModels 的 maxInputTokens，TTL 1h）——权威值；
+//  3. staticContextLimits 静态表（只收录已验证值）。
+//
+// 查不到一律返回 0 = 不拦截：交给上游判定，命中 11115 由短路分支兜底。
+// 绝不因为"表里猜了个小值"就拒掉用户请求（2026-09-15 误杀 11 次真实请求的教训）。
+// 只读缓存，绝不触发网络请求（见 cachedContextLimit 说明）。
+func (h *Handler) inputLimitFor(model string) int64 {
+	if h.cfg.MaxInputTokens > 0 {
+		return h.cfg.MaxInputTokens
+	}
+	if model == "" {
+		return 0
+	}
+	if lim, ok := cachedContextLimit(model); ok {
+		return lim
+	}
+	if lim, ok := staticContextLimits[model]; ok {
+		return lim
+	}
+	return 0
+}
+
+// cachedContextLimit 只读 dynamicModelsCache（不触发拉取），未命中返回 false。
+func cachedContextLimit(model string) (int64, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	for _, mi := range dynamicModelsCache.ids {
+		if mi.ID == model && mi.ContextWindow > 0 && mi.ContextWindow != globalModelContextFallback {
+			return mi.ContextWindow, true
+		}
+	}
+	return 0, false
+}
+
+// globalModelContextFallback global 探测模式写入的兜底 contextWindow
+// （见 upstream.fetchGlobalModels）。等于该值说明未探明真实上限。
+const globalModelContextFallback = 131072
+
+// staticContextLimits 静态输入上限表。
+//
+// 数值分两类，务必区分清楚，别再把二者混为一谈：
+//
+//	[已验证] 有硬证据：上游 11115 错误文案里明写的 maximum，或 models 接口的 maxInputTokens。
+//	[运维指定] 用户指定的预算上限，不是上游真实能力——作用只是"别让明显过大的请求
+//	          白打三次上游"，真正的上限仍由上游判定 + 11115 短路兜底。
+//
+// 历史教训（2026-09-15/16）：
+//   - 曾把 CN 静态表的兜底值 131072 抄给 global 的 glm/gpt/kimi，导致 1.75MB 的正常请求
+//     被按 131k 上限误杀（日志 model=gpt-5.3-codex bytes=1750122 limit=131072）。
+//   - 用户要求把这些模型的预算提升到 300k（原 131k 过紧）。
+var staticContextLimits = map[string]int64{
+	// [已验证] 来源：上游 400 code=11115 文案 "prompt is too long: N tokens > 1048576 maximum"
+	"deepseek-v4.1-flash": 1048576,
+	// [运维指定] 用户 2026-09-16 要求提升到 300k（原误填 131072）。
+	"glm-5.2":       300000,
+	"glm-5.1":       300000,
+	"kimi-k2.5":     300000,
+	"kimi-k2.6":     300000,
+	"kimi-k3":       300000,
+	"minimax-m3":    300000,
+	"gpt-5.4":       300000,
+	"gpt-5.3-codex": 300000,
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。

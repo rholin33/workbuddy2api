@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -433,10 +434,10 @@ readLoop:
 			return err
 		}
 	}
-	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
-	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
+	// 空流（0 有效帧）：若上游返回 200 但没有产出有效 chunk，先写一帧合法的空 delta 保证客户端能接收，
+	// 再写 [DONE] 正常结束，避免客户端报 upstream stream closed before [DONE] 崩溃。
 	if validFrames == 0 {
-		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error"}}`)
+		_ = writeRaw(`{"choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
@@ -446,7 +447,8 @@ readLoop:
 		fl.Flush()
 	}
 	if validFrames == 0 {
-		return fmt.Errorf("upstream stream contained no valid data events")
+		log.Printf("upstream stream contained 0 valid frames, synthesized empty delta + [DONE]")
+		return nil
 	}
 	return nil
 }

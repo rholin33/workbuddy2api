@@ -56,6 +56,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 			obj["messages"] = cleaned
 		}
 	}
+	// 尾部悬空 assistant 帧剥离（见下）：interrupted turn 会留下空 content + 残缺
+	// reasoning 的尾帧，上游 thinking 模式按 11155 拒收，同样属「让请求通过」的安全网。
+	trimTrailingAssistant(obj)
 	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
 	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
@@ -253,5 +256,79 @@ func normalizeToolChoice(obj map[string]any) {
 		}
 	default:
 		delete(obj, "tool_choice")
+	}
+}
+
+// isContentEmpty 检查 message 的 content 是否为空（nil、空字符串、全空白符、或空列表/全空白列表）。
+func isContentEmpty(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch c := v.(type) {
+	case string:
+		return strings.TrimSpace(c) == ""
+	case []any:
+		if len(c) == 0 {
+			return true
+		}
+		for _, item := range c {
+			if m, ok := item.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok && strings.TrimSpace(t) != "" {
+					return false
+				}
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// trimTrailingAssistant 剥除 messages 末尾悬空的 assistant 消息：
+// 1. 当 messages 末尾是 role: "assistant" 且无 tool_calls 时：
+//    - 若前一条是 role: "tool"（工具执行完毕后，上游契约由模型生成应答，尾部附带 assistant 导致 DeepSeek 400 11155）；
+//    - 或其 content 为空/空白（如 Codex CLI 中断产生的残缺 reasoning 帧，触发 Kimi 400 11151 或 DeepSeek 11155）。
+// 2. 循环剥除，还原到正常的待应答状态（以 user 或 tool 结尾），保留有效前置消息。
+func trimTrailingAssistant(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return
+	}
+	trimmed := false
+	for len(msgs) > 0 {
+		last := msgs[len(msgs)-1]
+		lastMap, ok := last.(map[string]any)
+		if !ok {
+			break
+		}
+		role, _ := lastMap["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			break
+		}
+		// 若带有非空 tool_calls，不是无用悬空残片
+		if tc, ok := lastMap["tool_calls"].([]any); ok && len(tc) > 0 {
+			break
+		}
+		prevIsTool := false
+		if len(msgs) >= 2 {
+			if prevMap, ok := msgs[len(msgs)-2].(map[string]any); ok {
+				prevRole, _ := prevMap["role"].(string)
+				if strings.EqualFold(strings.TrimSpace(prevRole), "tool") {
+					prevIsTool = true
+				}
+			}
+		}
+		empty := isContentEmpty(lastMap["content"])
+		// 只要符合「前一条是 tool」或「内容为空」之一，即剥除
+		if prevIsTool || empty {
+			log.Printf("trimmed trailing dangling assistant message at index %d (prevIsTool=%v, empty=%v)", len(msgs)-1, prevIsTool, empty)
+			msgs = msgs[:len(msgs)-1]
+			trimmed = true
+		} else {
+			break
+		}
+	}
+	if trimmed {
+		obj["messages"] = msgs
 	}
 }

@@ -186,7 +186,55 @@ var contentBlockedRule = errorRule{kind: ErrContentBlocked, mode: matchLower, pa
 var badParamsRule = errorRule{kind: ErrBadParams, mode: matchExact, patterns: []string{
 	"Unmarshal chat params failed",
 	`"code":11101`,
+	// 以下合并自本地分支 pr-45（同属「发给上游的 body 有问题」，与账号健康无关 → 不罚号）：
+	//   - 11155/11151 = 悬空 assistant 帧 / 空内容。网关已有 payload 侧 sanitize 安全网，
+	//     这里是分类层二次兜底（sanitize 漏网时至少不冷却好号）；
+	//   - 11133 = 请求参数/内容不合法（model_param_invalid / invalid_value）。实测诱因
+	//     （2026-09-16 受控矩阵）：图片字节无效（截断 PNG、随机 base64 垃圾）；有效图片的
+	//     https URL 与内联 data: URL 完全等价（均 200）。换任何账号都是同一份 body，故
+	//     调用方（handler）另有 IsClientParamError 短路，不轮转直接回 400。
+	`"code":11133`,
+	`"code":11155`,
+	`"code":11151`,
+	"reasoning_content_missing",
+	"empty_message_content",
 }}
+
+// clientParamMarkers 上游明确「请求参数/内容不合法」的特征（换号必然同样失败）。
+// 与 badParamsRule 的区别：这些必须**短路回客户端**，轮转纯属浪费上游往返，还会把
+// 错误升级成 503 no_healthy_account（客户端误判账号全废/额度用尽）。
+var clientParamMarkers = []string{
+	`"code":11133`,
+	"model_param_invalid",
+}
+
+// IsClientParamError 报告上游 body 是否为「请求参数/内容不合法」类错误。
+func IsClientParamError(body string) bool {
+	for _, m := range clientParamMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// contextTooLongMarkers 「输入超模型上下文上限」特征（上游 400 code=11115）。
+var contextTooLongMarkers = []string{
+	`"code":11115`,
+	"context_length_exceeded",
+	"prompt is too long",
+}
+
+// IsContextTooLong 报告上游 body 是否为「输入超出模型上下文上限」。
+// 供 handler 在轮转循环里识别并立即终止（不再换号重试同一份超大请求）。
+func IsContextTooLong(body string) bool {
+	for _, m := range contextTooLongMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // alreadyCheckinRule "今天已签到"关键词（上游对重复签到返回 code!=0，
 // 实测 code=10001/14001 "今天已签到"/"今日已签到"）。只对 *Error.Msg 做包含匹配，
@@ -505,6 +553,13 @@ func Classify(status int, body string) ErrKind {
 			return ErrContentBlocked
 		}
 		if badParamsRule.hit(body, lower) {
+			return ErrBadParams
+		}
+		// 输入超模型上限（code 11115 / context_length_exceeded）：同归 ErrBadParams（不罚号），
+		// 但换账号同样无意义——同一份超大 body 对每个账号都是 400。轮转只会平白多打上游
+		// 几次并把错误升级成 503，故由 handler 侧 IsContextTooLong 短路终止。
+		// 合并自本地分支 pr-45（上游 master 原本落 ErrClient 兜底）。
+		if IsContextTooLong(body) {
 			return ErrBadParams
 		}
 		return ErrClient
@@ -1594,5 +1649,12 @@ func IsAlreadyCheckin(err error) bool {
 }
 
 func truncate(s string, n int) string {
+	return logfmt.Truncate(s, n)
+}
+
+// Utf8Truncate 截断为最多 n 字节且不切断 UTF-8 字符（用户可见错误文案用）。
+// 与上游 truncate 同源（logfmt.Truncate 已是 rune 边界安全实现），保留本名字仅为
+// 兼容本地分支 pr-45 的调用点（handler 错误文案 / 日志）。
+func Utf8Truncate(s string, n int) string {
 	return logfmt.Truncate(s, n)
 }

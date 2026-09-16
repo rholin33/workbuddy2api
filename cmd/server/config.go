@@ -26,6 +26,14 @@ type Config struct {
 		// （issue #41：截断的 JSON 让上游 unmarshal 报 unexpected EOF，网关却罚号）。
 		// 0/负数视为非法 → normalize 回落默认并记录。
 		MaxBodyMB int `json:"max_body_mb"`
+		// ContextGuard 上下文预算预检开关（缺省 true = 开启）。
+		// 开启时对 512KB 以上的请求体按内容类型估算 token，明显超上限才本地 400
+		// （宁可漏拦不误杀；真正的兜底是上游 11115 短路，见 handler.chatCompletions）。
+		// 设 false 可完全关闭本地预检。
+		ContextGuard *bool `json:"context_guard"`
+		// MaxInputTokens >0 时作为所有模型的统一输入上限（0/缺省 = 按模型内置表）。
+		// 运维可调，改这个值即可整体放宽/收紧，无需改代码。
+		MaxInputTokens int64 `json:"max_input_tokens"`
 	} `json:"server"`
 
 	Cooldown struct {

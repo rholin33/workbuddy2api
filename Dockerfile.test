@@ -1,0 +1,9 @@
+# syntax=docker/dockerfile:1
+# 测试专用构建（不产出运行镜像）：在 Dockerfile 同一 golang 版本下跑 build/vet/test。
+FROM golang:1.23-alpine AS test
+ENV GOPROXY=https://goproxy.cn,direct
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN sh scripts/test_run.sh

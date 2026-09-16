@@ -185,6 +185,9 @@ func main() {
 		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 上下文预算预检：缺省开启（*bool 为 nil 即未配置）。
+		ContextGuard:   cfg.Server.ContextGuard == nil || *cfg.Server.ContextGuard,
+		MaxInputTokens: cfg.Server.MaxInputTokens,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

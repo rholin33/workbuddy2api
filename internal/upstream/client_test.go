@@ -46,12 +46,14 @@ func TestClassify(t *testing.T) {
 		{400, `unapproved channel`, ErrContentBlocked},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
-		// ErrBadParams：请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）。
-		// 这是"发给上游的 body 有问题"（网关截断已由 413 消灭，剩余为客户端畸形 JSON），
+		// ErrBadParams：请求体解析失败或参数校验失败（HTTP 400 + code 11101 / 11155 / 11151 等）。
+		// 这是"发给上游的 body 有问题"（网关截断已由 413 消灭，剩余为客户端畸形 JSON/协议参数不合规），
 		// 换了账号也一样 400，不罚号。具体词优先于通用 4xx。
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		{400, `{"code":11155,"msg":"the reasoning content from the previous turn must be passed back in thinking mode"}`, ErrBadParams},
+		{400, `{"code":11151,"msg":"a message has empty content, please check the conversation history and retry"}`, ErrBadParams},
 		{200, `quota exceeded`, ErrHardCredit},
 		// 账号级授权/配额故障（与 429 一起纳入轮换）：11140 request illegal = auth_forbidden
 		// 风控（需重登），14017 = quota_not_activated（试用未激活，需完成 register）。修复前
@@ -110,7 +112,7 @@ func TestIsWafBlocked(t *testing.T) {
 	}{
 		{403, "", true},
 		{403, "<html>blocked</html>", true},
-		{403, `{"code":1}`, false},               // 有 "code": 字段
+		{403, `{"code":1}`, false},                // 有 "code": 字段
 		{403, `{"msg":"request illegal"}`, false}, // 有 "msg": 字段（且该文案本就该走 accountFault）
 		{402, "", false},                          // 非 403
 		{429, "", false},
@@ -748,9 +750,40 @@ func TestBasesAlwaysCN(t *testing.T) {
 	if c.chatBase(cn) != "https://chat.example" || c.billingBase(cn) != "https://billing.example" {
 		t.Error("cn bases wrong")
 	}
-	// 恒 CN：domain 不同不改变上游 host。
+	// 非 workbuddy.ai 后缀的 domain 不改变上游 host。
 	if c.chatBase(other) != c.chatBase(cn) || c.billingBase(other) != c.billingBase(cn) {
 		t.Error("bases must be CN regardless of domain")
+	}
+}
+
+// TestBasesGlobalByDomain 国际版账号（domain 以 .workbuddy.ai 结尾）切到
+// www.workbuddy.ai；New() 默认值即此（空 Client 字段回落 CN 不影响）。
+func TestBasesGlobalByDomain(t *testing.T) {
+	// 上游 master 起 base 选择多一道 Client.GlobalEnabled 闸（零值 false = 纯 CN 路由，
+	// 见 globalOn）；故此处必须显式开启，并同时打开 auth 侧逃生门。
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+	c := New() // 取 CN base 默认值；GlobalEnabled 须显式开启（上游新增的第三道闸）
+	c.GlobalEnabled = true
+	cn := &auth.Auth{Domain: "copilot.tencent.com"}
+	global := &auth.Auth{Domain: "abc.workbuddy.ai"}
+	if c.chatBase(global) != "https://www.workbuddy.ai" {
+		t.Errorf("global chatBase=%q", c.chatBase(global))
+	}
+	if c.billingBase(global) != "https://www.workbuddy.ai" {
+		t.Errorf("global billingBase=%q", c.billingBase(global))
+	}
+	if c.chatBase(cn) != "https://copilot.tencent.com" {
+		t.Errorf("cn chatBase=%q", c.chatBase(cn))
+	}
+	if c.billingBase(cn) != "https://www.codebuddy.cn" {
+		t.Errorf("cn billingBase=%q", c.billingBase(cn))
+	}
+	if originRefererFor(global) != "https://www.workbuddy.ai" {
+		t.Errorf("global origin=%q", originRefererFor(global))
+	}
+	if originRefererFor(cn) != "https://www.codebuddy.cn" {
+		t.Errorf("cn origin=%q", originRefererFor(cn))
 	}
 }
 

@@ -5,8 +5,16 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      - HTTP_PROXY=http://host.docker.internal:10809
+      - HTTPS_PROXY=http://host.docker.internal:10809
+      - NO_PROXY=localhost,127.0.0.1,workbuddy2api,cli-proxy-api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "7863:7863"
+      - "127.0.0.1:7863:7863"
+    networks:
+      - cpa_default
+      - default
     volumes:
       # auths 凭证卷：login.sh 在宿主机落盘 workbuddy-<uid>.json（0600），容器网关以
       # app(uid 10001) 读 + 回写（refresh / realm backfill 走 tmp+rename，需目录写权限）。
@@ -22,3 +30,7 @@ services:
       #   chown -R 10001:10001 ./data
       - ./data:/app/data
       - ./config.json:/app/config.json:ro
+
+networks:
+  cpa_default:
+    external: true
